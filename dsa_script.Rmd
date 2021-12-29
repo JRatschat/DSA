@@ -1,0 +1,467 @@
+---
+title: "dsa"
+author: "JR"
+date: "10/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Source: https://www.kaggle.com/francoisraucent/western-europe-power-consumption/version/1?select=de.csv
+```
+
+```{r}
+library(tidyverse)
+library(scales)
+library(dsa)
+library(forecast)
+library(stR)
+library(xts)
+library(stargazer)
+library(grid)
+```
+
+```{r}
+# Set theme for plots
+mytheme <- theme(
+  panel.background = element_rect(fill = 'white', colour = 'white'),
+  panel.border = element_blank(),
+  panel.grid.major = element_blank(),# element_line(size = 0.5, linetype = 'solid', colour = 'lightgrey'),
+  panel.grid.minor = element_blank(),
+  panel.spacing = unit(0.25, 'lines'),
+  axis.line = element_line(colour = 'black', size = 0.5, linetype = 'solid'),
+  text = element_text(size = 12, family = "sans"),
+  strip.background = element_rect(fill='#f2f2f2') +
+    scale_fill_discrete())
+```
+
+
+```{r}
+power <- read.csv("data/de.csv")
+
+power <-
+  power %>%
+  mutate(date = str_sub(start, 1, 10),
+         date = as.Date(date)) %>%
+  group_by(date) %>%
+  summarise(load = sum(load)) %>%
+  filter(load > 100000) %>%
+  mutate(weekday= weekdays(date),
+         month =  format(date, "%m"),
+         year = format(date, "%Y"))
+```
+
+```{r}
+jpeg("graphics/week_day.jpeg", quality = 100, units='in', width = 10, height = 5, res = 250)
+power %>%
+  mutate(
+    weekday = factor(weekday, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+  ) %>%
+  ggplot(aes(x = weekday, y = load)) +
+  geom_boxplot() +
+  labs(
+    x = "Day of the Week",
+    y = "Daily Power Consumption (MW)"
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000),
+    labels = c("0", "1M", "2M", "3M", "4M", "5M", "6M", "7M"),
+    expand = c(0,0),
+    limit = c(0, 7000000)
+  ) +
+  mytheme
+dev.off()
+```
+
+```{r}
+power %>%
+  mutate(day = format(date, format = "%d")) %>%
+  ggplot(aes(x = day, y = load)) +
+  geom_boxplot() +
+  labs(
+    x = "Day of the Month",
+    y = "Daily Power Consumption (MW)"
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000),
+    labels = c("0", "1M", "2M", "3M", "4M", "5M", "6M", "7M"),
+    expand = c(0,0),
+    limit = c(0, 7000000)
+  ) +
+  mytheme
+```
+
+```{r}
+jpeg("graphics/month.jpeg", quality = 100, units='in', width = 10, height = 5, res = 250)
+power %>%
+  mutate(month = format(month, format = "%m")) %>%
+  ggplot(aes(x = month, y = load)) +
+  geom_boxplot() +
+  labs(
+    x = "Month",
+    y = "Daily Power Consumption (MW)"
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000),
+    labels = c("0", "1M", "2M", "3M", "4M", "5M", "6M", "7M"),
+    expand = c(0,0),
+    limit = c(0, 7000000)
+  ) +
+  mytheme
+dev.off()
+```
+
+```{r}
+jpeg("graphics/daily_time_series.jpeg", quality = 100, units='in', width = 10, height = 5, res = 250)
+ggplot(power) +
+  geom_line(aes(date, load)) +
+  labs(
+    x = "Day",
+    y = "Daily Power Consumption (MW)"
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000),
+    labels = c("0", "1M", "2M", "3M", "4M", "5M", "6M", "7M"),
+    expand = c(0,0),
+    limit = c(0, 7000000)
+  ) +
+  scale_x_date(date_breaks = "4 months",
+               date_minor_breaks = "4 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+```{r}
+# Calculate daily adjusted and trend time series using DSA
+Sys.setenv(TZ = "UTC")
+daily_adjusted <- xts::xts(x = power$load, order.by = power$date)
+daily_adjusted <- daily_adjusted[!is.na(daily_adjusted)]
+dimnames(daily_adjusted)[[2]] <- "original"
+
+reference_series <- daily_adjusted
+restrict <- seq.Date(from = stats::start(reference_series),
+                     to = stats::end(reference_series), by = "days")
+
+restrict_forecast <- seq.Date(from=stats::end(reference_series) + 1,
+                              length.out = 365, by = "days")
+
+AllHol <- 
+  merge(
+    holidays[, c(
+      "EasterSunday",
+      "EasterMonday",
+      #"EasterMondayAft1Day",
+      #"HolyThursday",
+      "GoodFriday",
+      "Ascension",
+      "CorpusChristi",
+      "Pentecost",
+      "PentecostAft1Day",
+      "PentecostMonday",
+      "ChristmasEve",
+      "ChristmasDay",
+      "NewYearsEve",
+      "NewYearsDay",
+      "ReformationDay",
+      "LabourDay",
+      "GermanUnity"
+    )],
+    stats::lag(holidays$LabourDay, 1),
+    stats::lag(holidays$ChristmasDay, 1),
+    stats::lag(holidays$NewYearsDay, 1),
+    stats::lag(holidays$NewYearsDay, 5)
+  )
+
+AllHolUse <- dsa::multi_xts2ts(AllHol[restrict])
+AllHolForecast <- multi_xts2ts(AllHol[restrict_forecast], short=TRUE)
+AllHolForecast <- AllHolForecast[,colSums(AllHolUse)!=0]
+AllHolUse <- AllHolUse[,colSums(AllHolUse)!=0]
+
+daily_adjusted_sa <- 
+  dsa::dsa(daily_adjusted,
+           Log = TRUE,
+           cval = 10,
+           robust1 = TRUE,
+           robust2 = TRUE,
+           robust3 = TRUE,
+           s.window1 = 13,
+           s.window2 = NULL,
+           s.window3 = 13,
+           fourier_number = 26,
+           regressor = AllHolUse,
+           forecast_regressor = AllHolForecast,
+           feb29 = "sfac"
+  )
+
+daily_adjusted_sa$reg$aicc
+```
+
+```{r}
+# Merge DSA data to daily data
+original <- dsa::get_original(daily_adjusted_sa)
+original <- data.frame(date = index(original), coredata(original))
+
+sa <- dsa::get_sa(daily_adjusted_sa)
+sa <- data.frame(date = index(sa), coredata(sa))
+
+trend <- dsa::get_trend(daily_adjusted_sa)
+trend <- data.frame(date = index(trend), coredata(trend))
+
+daily <- left_join(original, sa)
+daily <- left_join(daily, trend)
+
+# Holiday effects
+holiday <-
+  data.frame(estimate = daily_adjusted_sa$reg$coef, se = sqrt(diag(daily_adjusted_sa$reg$var.coef)))[59:75,] %>%
+  mutate(
+    t_stat = (estimate / se)^2,
+    p_value = round(pchisq(t_stat, df =1 , lower = FALSE), 4)
+  )
+
+stargazer(holiday, summary = FALSE)
+```
+
+```{r}
+# DSA decomposition plot
+g1 <-
+  daily %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = original, color = "Original")) +
+  geom_line(aes(x = date, y = seas_adj, color = "Seasonally-Adjusted")) +
+  scale_colour_manual(name = "",
+                      values = c("Original" = "#666666", "Seasonally-Adjusted" = "black")) +
+  ggplot2::theme(legend.position = c(0.775, 0.25)) +
+  labs(
+    x = "",
+    y = "Power Consumption",
+    subtitle = "Original and Seasonally-Adjusted Series"
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000),
+    labels = c("0", "1M", "2M", "3M", "4M", "5M", "6M", "7M"),
+    expand = c(0,0),
+    limit = c(0, 7000000)
+  ) +
+  scale_x_date(date_breaks = "6 months",
+               date_minor_breaks = "6 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme
+
+
+s1_fac <- daily_adjusted_sa$sfac_result[,1]["2015/2020-09"]
+s1_fac <- data.frame(date = index(s1_fac), coredata(s1_fac))
+
+g2 <- 
+  s1_fac %>%
+  ggplot() +
+  geom_line(aes(x = date, s1_fac)) +
+  labs(
+    x = "",
+    y = "Effect",
+    subtitle  = "Intra-Weekly Seasonal Component"
+  ) +
+  scale_x_date(date_breaks = "6 months",
+               date_minor_breaks = "6 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cal_fac <- daily_adjusted_sa$sfac_result[,2]["2015/2020-09"]
+cal_fac <- data.frame(date = index(cal_fac), coredata(cal_fac))
+
+g3 <-
+  cal_fac %>%
+  ggplot() +
+  geom_line(aes(x = date, cal_fac)) +
+  labs(
+    x = "",
+    y = "Daily Power Consumption (MW)",
+    subtitle  = "Moving Holiday Effect"
+  ) +
+  scale_x_date(date_breaks = "6 months",
+               date_minor_breaks = "6 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+s2_fac <- daily_adjusted_sa$sfac_result[,3]["2015/2020-09"]
+s2_fac <- data.frame(date = index(s2_fac), coredata(s2_fac))
+
+g4 <-
+  s2_fac %>%
+  ggplot() +
+  geom_line(aes(x = date, s2_fac)) +
+  labs(
+    x = "",
+    y = "Effect",
+    subtitle  = "Intra-Monthly Seasonal Component"
+  ) +
+  scale_x_date(date_breaks = "6 months",
+               date_minor_breaks = "6 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+s3_fac <- daily_adjusted_sa$sfac_result[,4]["2015/2020-09"]
+s3_fac <- data.frame(date = index(s3_fac), coredata(s3_fac))
+
+g5 <-
+  s3_fac %>%
+  ggplot() +
+  geom_line(aes(x = date, s3_fac)) +
+  labs(
+    x = "Daily",
+    y = "Effect",
+    subtitle  = "Intra-Annual Seasonal Component"
+  ) +
+  scale_x_date(date_breaks = "6 months",
+               date_minor_breaks = "6 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gridExtra::grid.arrange(g2, g3, g4, g5, nrow=5)
+
+jpeg("graphics/decomposition_dsa.jpeg", quality = 100, units='in', width = 7.68, height = 7.68, res = 250)
+grid.newpage()
+grid.draw(rbind(ggplotGrob(g1 + 
+                             theme(axis.title.y = element_blank(), axis.title.x = element_blank(), axis.text.x = element_blank(), legend.direction = "horizontal")), 
+                ggplotGrob(g2 + 
+                             theme(axis.title.y = element_blank(), axis.title.x = element_blank(), axis.text.x = element_blank())), 
+                ggplotGrob(g3 + 
+                             theme(axis.title.x = element_blank(), axis.text.x = element_blank())),
+                ggplotGrob(g4 + 
+                             theme(axis.title.y = element_blank(), axis.title.x = element_blank(), axis.text.x = element_blank())),
+                ggplotGrob(g5 + theme(axis.title.y = element_blank()))
+))
+dev.off()
+
+```
+
+```{r}
+jpeg("graphics/adjusted_time_series.jpeg", quality = 100, units='in', width = 10, height = 5, res = 250)
+daily %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = original, color = "Original")) +
+  geom_line(aes(x = date, y = seas_adj, color = "Seasonally-Adjusted")) +
+  scale_colour_manual(name = "",
+                      values = c("Original" = "#666666", "Seasonally-Adjusted" = "black")) +
+  ggplot2::theme(legend.position = c(0.775, 0.25)) +
+  labs(
+    x = "",
+    y = "Power Consumption",
+    subtitle = "Original and Seasonally-Adjusted Series"
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000, 7000000),
+    labels = c("0", "1M", "2M", "3M", "4M", "5M", "6M", "7M"),
+    expand = c(0,0),
+    limit = c(0, 7000000)
+  ) +
+  scale_x_date(date_breaks = "6 months",
+               date_minor_breaks = "6 months", 
+               labels = date_format("%Y-%m")) +
+  mytheme
+dev.off()
+```
+
+
+```{r}
+# Other deseasonalization methods
+deTot_msts <- msts(daily_adjusted, seasonal.periods=c(7, 365.2524))
+
+# STR
+str_res <- AutoSTR(deTot_msts)
+str_out <- stR::seasadj(str_res)
+str_out <- xts::xts(str_out, zoo::index(na.omit(daily_adjusted)))
+
+# TBATS
+tbats_res <- tbats(deTot_msts)
+tbats_out <- forecast::seasadj(tbats_res)
+tbats_out <- xts::xts(as.numeric(tbats_out), zoo::index(na.omit(daily_adjusted)))
+
+g1 <- xtsplot(merge(na.omit(daily_adjusted), tbats_out, str_out, get_sa(daily_adjusted_sa))["2017/"],
+              names = c("Original", "TBATS", "STR", "DSA"), color = c("darkgrey", "blue", "orange", "red"),
+              # main="Comparison of seasonal adjustment result",
+              submain = "From 2017",
+              linesize = 0.75
+) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggplot2::theme(legend.position = "None") +
+  mytheme
+
+g2 <- xtsplot(merge(na.omit(daily_adjusted), tbats_out, str_out, get_sa(daily_adjusted_sa))["2020/2020-12-31"],
+              names = c("Original", "TBATS", "STR", "DSA"), color = c("darkgrey", "blue", "orange", "red"),
+              # main="Comparison of seasonal adjustment result",
+              submain = "From 2020",
+              linesize = 0.75
+) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggplot2::theme(legend.position = "None", plot.title = ggplot2::element_blank()) +
+  mytheme
+
+g3 <- xtsplot(merge(na.omit(daily_adjusted), tbats_out, str_out, get_sa(daily_adjusted_sa))["2020-03-01/2020-05-31"],
+              names = c("Original", "TBATS", "STR", "DSA"), color = c("darkgrey", "blue", "orange", "red"),
+              # main="Comparison of seasonal adjustment result",
+              submain = "2020-03-01 to 2020-03-31",
+              linesize = 0.75
+) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggplot2::theme(plot.title = ggplot2::element_blank()) +
+  mytheme
+
+gridExtra::grid.arrange(g1, g2, g3, layout_matrix = matrix(c(1, 1, 2, 2, 3, 3, 3), ncol = 1))
+
+```
+
+```{r}
+# Set of functions to output the seasonality tests.
+set_of_seastests <- function(x) {
+  fried365 <- seastests::fried(dsa::xts2ts(x, 365), freq=365)  
+  qs365 <- seastests::qs(dsa::xts2ts(x, 365), freq=365)
+  fried12 <- seastests::fried(dsa:::.to_month(x), freq=12)
+  qs12 <- seastests::qs(dsa:::.to_month(x), freq=12)
+  fried7 <- seastests::fried(xts::last(x,70), freq=7)
+  qs7 <- seastests::qs(xts::last(x,70), freq=7)
+  fried7_all <- seastests::fried(x, freq=7)
+  qs7_all <- seastests::qs(x, freq=7)
+  
+  stats <- round(c(fried365$stat, qs365$stat, fried12$stat, qs12$stat, 
+                   fried7$stat, qs7$stat, fried7_all$stat, qs7_all$stat),1)
+  
+  pvals <- round(c(fried365$Pval, qs365$Pval, fried12$Pval, qs12$Pval, 
+                   fried7$Pval, qs7$Pval, fried7_all$Pval, qs7_all$Pval),3)
+  
+  out <- cbind(stats, pvals)
+  rownames(out) <- c("Friedman365", "QS365", "Friedman12", "QS12", 
+                     "Friedman7", "QS7", "Friedman7all", "QS7all")
+  colnames(out) <- c("Teststat", "P-value")
+  return(out)
+}
+
+all_seas <- function(x, ...) {
+  if (missing(...)) {
+    bc <- x
+  } else {
+    bc <- list(x, ...)
+  }
+  
+  out <- set_of_seastests(bc[[1]])
+  if (length(bc)>1) {
+    for (j in 2:length(bc)) {
+      out <- cbind(out, set_of_seastests(bc[[j]]))
+    }
+  }
+  return(out)
+}
+```
+
+```{r}
+# Get results for QS and Friedman test
+all_seas(zoo::na.locf(daily_adjusted), tbats_out, str_out, get_sa(daily_adjusted_sa))
+```
